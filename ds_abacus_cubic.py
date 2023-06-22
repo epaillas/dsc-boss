@@ -42,21 +42,22 @@ def get_rsd_positions(hod_dict):
     return x, y, z, x_rsd, y_rsd, z_rsd
 
 
-def density_split(data_positions, boxsize, cellsize=5.0, seed=42,
-    smooth_radius=20, nquantiles=5, filter_shape='Tophat', nthreads=1,
-    method='mesh'):
+def density_split(data_positions, boxsize, boxcenter, seed=42,
+    smoothing_radius=20, nquantiles=5, filter_shape='Gaussian',
+    nthreads=1, method='mesh', cellsize=5.0):
     """Split random points according to their local density
     density."""
-    ds = DensitySplit(data_positions, boxsize)
+    ds = DensitySplit(data_positions=data_positions, boxsize=boxsize,
+                      cellsize=cellsize, boxcenter=boxcenter,
+                      wrap=True, nthreads=nthreads)
     np.random.seed(seed=seed)
     sampling_positions = np.random.uniform(0,
-        boxsize, (5 * len(data_positions), 3))
+        boxsize, (nquantiles * len(data_positions), 3))
     if method == 'mesh':
-        density = ds.get_density_mesh(smooth_radius=smooth_radius,
-            cellsize=cellsize, sampling_positions=sampling_positions,
-            filter_shape=filter_shape)
+        density = ds.get_density_mesh(smoothing_radius=smoothing_radius,
+                                      sampling_positions=sampling_positions,)
     elif method == 'paircount':
-        density = ds.get_density_paircount(smooth_radius=smooth_radius,
+        density = ds.get_density_paircount(smoothing_radius=smoothing_radius,
             sampling_positions=sampling_positions, nthreads=nthreads,
             filter_shape=filter_shape)
     quantiles, quantiles_idx = ds.get_quantiles(
@@ -155,13 +156,13 @@ if __name__ == '__main__':
     setup_logging(level='WARNING')
     overwrite = True
     nthreads = 256
-    save_mock = False
+    save_mock = True
     boxsize = 2000
     cellsize = 5.0
     redshift = 0.5
     split = 'z'
     filter_shape = 'Gaussian'
-    smooth_ds = 10
+    smoothing_radius = 10
     redges = np.hstack(
         [np.arange(0, 5, 1),
         np.arange(7, 30, 3),
@@ -210,12 +211,12 @@ if __name__ == '__main__':
                     cross_fn = Path(
                         f'/global/homes/e/epaillas/carolscratch/ds_boss/ds_cross_multipoles/HOD/{dataset}/',
                         f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/',
-                        f'ds_cross_multipoles_{split}split_{filter_shape.lower()}_Rs{smooth_ds}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                        f'ds_cross_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                     )
                     auto_fn = Path(
                         f'/global/homes/e/epaillas/carolscratch/ds_boss/ds_auto_multipoles/HOD/{dataset}/',
                         f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/',
-                        f'ds_auto_multipoles_{split}split_{filter_shape.lower()}_Rs{smooth_ds}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                        f'ds_auto_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                     )
                     if os.path.exists(cross_fn) and os.path.exists(auto_fn):
                         print(f'c{cosmo:03} ph{phase:03} hod{hod} already exists')
@@ -230,7 +231,7 @@ if __name__ == '__main__':
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
                     output_fn = Path(
                         output_dir,
-                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}_hod{hod}.fits'
                     )
                     output_mock(hod_dict, newBall, output_fn, 'LRG',)
 
@@ -250,14 +251,16 @@ if __name__ == '__main__':
 
                     data_positions_ap = get_distorted_positions(positions=data_positions, los=los,
                                                                 q_perp=q_perp, q_para=q_para)
-                    boxsize_ap = get_distorted_box(boxsize=boxsize, q_perp=q_perp, q_para=q_para,
-                                                   los=los)
+                    boxsize_ap = np.array(get_distorted_box(boxsize=boxsize, q_perp=q_perp, q_para=q_para,
+                                                            los=los))
+                    boxcenter_ap = boxsize_ap / 2
 
                     start_time = time.time()
                     quantiles_ap, quantiles_idx, density = density_split(
                         data_positions=data_positions_ap, boxsize=boxsize_ap,
-                        cellsize=cellsize, seed=phase, filter_shape=filter_shape,
-                        smooth_radius=smooth_ds, nquantiles=5, method='mesh')
+                        boxcenter=boxcenter_ap, cellsize=cellsize, seed=phase,
+                        filter_shape=filter_shape, smoothing_radius=smoothing_radius,
+                        nquantiles=5, method='mesh', nthreads=nthreads,)
                     print(f'split took {time.time() - start_time} sec')
 
                     cout = {
@@ -269,20 +272,20 @@ if __name__ == '__main__':
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
                     output_fn = Path(
                         output_dir,
-                        f'old_density_pdf_{split}split_{filter_shape.lower()}_Rs{smooth_ds}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                        f'density_pdf_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                     )
                     np.save(output_fn, cout)
 
                     # QUINTILE-GALAXY CROSS-CORRELATION
                     start_time = time.time()
                     cross_ds = []
-                    for i in range(5):
+                    for i in [0, 1, 3, 4]:
                         print(f'cosmo {cosmo}, hod {hod}, los {los}, ds{i}')
                         result = TwoPointCorrelationFunction(
                             'smu', edges=edges, data_positions1=quantiles_ap[i],
                             data_positions2=data_positions_ap, los=los,
                             engine='corrfunc', boxsize=boxsize_ap, nthreads=nthreads,
-                            compute_sepsavg=False, position_type='pos'
+                            compute_sepsavg=False, position_type='pos',
                         )
 
                         s, multipoles = result(ells=(0, 2, 4), return_sep=True)
@@ -293,7 +296,7 @@ if __name__ == '__main__':
                     # QUINTILE AUTOCORRELATION
                     start_time = time.time()
                     auto_ds = []
-                    for i in range(5):
+                    for i in [0, 1, 3, 4]:
                         result = TwoPointCorrelationFunction(
                             'smu', edges=edges, data_positions1=quantiles_ap[i],
                             los=los, engine='corrfunc', boxsize=boxsize_ap, nthreads=nthreads,
@@ -316,7 +319,7 @@ if __name__ == '__main__':
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
                 output_fn = Path(
                     output_dir,
-                    f'ds_cross_multipoles_{split}split_{filter_shape.lower()}_Rs{smooth_ds}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                    f'ds_cross_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                 )
                 np.save(output_fn, cout)
 
@@ -329,6 +332,6 @@ if __name__ == '__main__':
                 Path(output_dir).mkdir(parents=True, exist_ok=True)
                 output_fn = Path(
                     output_dir,
-                    f'ds_auto_multipoles_{split}split_{filter_shape.lower()}_Rs{smooth_ds}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                    f'ds_auto_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                 )
                 np.save(output_fn, cout)
