@@ -4,22 +4,16 @@ import yaml
 import numpy as np
 import argparse
 from astropy.table import Table
-from astropy.io import ascii
 from astropy.io import fits
 from astropy.io.fits import Header
 from abacusnbody.hod.abacus_hod import AbacusHOD
 from densitysplit.pipeline import DensitySplit
 from pathlib import Path
-from pypower import setup_logging
-from pycorr import TwoPointCorrelationFunction
+from pycorr import TwoPointCorrelationFunction, setup_logging
 from cosmoprimo.fiducial import AbacusSummit
-from cosmoprimo.cosmology import Cosmology
-from scipy.interpolate import RectBivariateSpline
-from scipy import special
-import sys
+import logging
 import time
 import warnings
-warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 
 
 def get_rsd_positions(hod_dict):
@@ -30,29 +24,30 @@ def get_rsd_positions(hod_dict):
     vx = data['vx']
     vy = data['vy']
     vz = data['vz']
-    x = data['x'] + boxsize / 2
-    y = data['y'] + boxsize / 2
-    z = data['z'] + boxsize / 2
+    x = data['x'] + args.boxsize / 2
+    y = data['y'] + args.boxsize / 2
+    z = data['z'] + args.boxsize / 2
     x_rsd = x + vx / (hubble * az)
     y_rsd = y + vy / (hubble * az)
     z_rsd = z + vz / (hubble * az)
-    x_rsd = x_rsd % boxsize
-    y_rsd = y_rsd % boxsize
-    z_rsd = z_rsd % boxsize
+    x_rsd = x_rsd % args.boxsize
+    y_rsd = y_rsd % args.boxsize
+    z_rsd = z_rsd % args.boxsize
     return x, y, z, x_rsd, y_rsd, z_rsd
 
 
 def density_split(data_positions, boxsize, boxcenter, seed=42,
     smoothing_radius=20, nquantiles=5, filter_shape='Gaussian',
-    nthreads=1, method='mesh', cellsize=5.0):
+    nthreads=1, method='mesh', cellsize=5.0, nquery=None):
     """Split random points according to their local density
     density."""
     ds = DensitySplit(data_positions=data_positions, boxsize=boxsize,
                       cellsize=cellsize, boxcenter=boxcenter,
                       wrap=True, nthreads=nthreads)
     np.random.seed(seed=seed)
-    sampling_positions = np.random.uniform(0,
-        boxsize, (nquantiles * len(data_positions), 3))
+    if nquery is None:
+        nquery = nquantiles * len(data_positions)
+    sampling_positions = np.random.uniform(0, boxsize, (nquery, 3))
     if method == 'mesh':
         density = ds.get_density_mesh(smoothing_radius=smoothing_radius,
                                       sampling_positions=sampling_positions,)
@@ -97,6 +92,7 @@ def output_mock(mock_dict, newBall, fn, tracer):
     table = Table(mock_dict[tracer])
     header = Header({'Ncent': Ncent, 'Gal_type': tracer, **newBall.tracers[tracer]})
     myfits = fits.BinTableHDU(data = table, header = header)
+    logger.info(f"Saving HOD to {fn}")
     myfits.writeto(fn, overwrite=True)
 
 def get_hod(p, param_mapping, param_tracer, data_params, Ball, nthread):
@@ -124,7 +120,7 @@ def setup_hod(config):
     fit_params = config['fit_params']    
     # create a new abacushod object and load the subsamples
     newBall = AbacusHOD(sim_params, HOD_params)
-    newBall.params['Lbox'] = boxsize
+    newBall.params['Lbox'] = args.boxsize
     # parameters to fit
     param_mapping = {}
     param_tracer = {}
@@ -137,6 +133,10 @@ def setup_hod(config):
 
 
 if __name__ == '__main__':
+    warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
+    logger = logging.getLogger('ds_abacus_cubic')
+    setup_logging(level='INFO')
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--start_hod", type=int, default=0)
     parser.add_argument("--n_hod", type=int, default=1)
@@ -144,44 +144,43 @@ if __name__ == '__main__':
     parser.add_argument("--n_cosmo", type=int, default=1)
     parser.add_argument("--start_phase", type=int, default=0)
     parser.add_argument("--n_phase", type=int, default=1)
+    parser.add_argument("--nthreads", type=int, default=256)
+    parser.add_argument("--boxsize", type=int, default=2000)
+    parser.add_argument("--cellsize", type=float, default=5.0)
+    parser.add_argument("--redshift", type=float, default=0.5)
+    parser.add_argument("--split", type=str, default='z')
+    parser.add_argument("--filter_shape", type=str, default='Gaussian')
+    parser.add_argument("--smoothing_radius", type=float, default=10)
+    parser.add_argument("--nquantiles", type=int, default=5)
+    parser.add_argument("--nquery", type=int, default=None)
+    parser.add_argument("--save_hod", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--save_quantiles", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--save_density", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--save_clustering", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--outdir", type=str, default="/pscratach/sd/c/cuesta/ds_boss/")
+    parser.add_argument("--hod_config_dir", type=str, default="/pscratch/sd/c/cuesta/ds_boss/code/")
+    parser.add_argument('--hod_params_dir', type=str, default="/pscratch/sd/c/cuesta/ds_boss/parameters/HOD/")
 
     args = parser.parse_args()
-    start_hod = args.start_hod
-    n_hod = args.n_hod
-    start_cosmo = args.start_cosmo
-    n_cosmo = args.n_cosmo
-    start_phase = args.start_phase
-    n_phase = args.n_phase
 
-    setup_logging(level='WARNING')
     overwrite = True
-    nthreads = 256
-    save_mock = True
-    boxsize = 2000
-    cellsize = 5.0
-    redshift = 0.5
-    split = 'z'
-    filter_shape = 'Gaussian'
-    smoothing_radius = 10
-    redges = np.hstack(
-        [np.arange(0, 5, 1),
-        np.arange(7, 30, 3),
-        np.arange(31, 155, 5)]
-    )
+    redges = np.hstack([np.arange(0, 5, 1),
+                        np.arange(7, 30, 3),
+                        np.arange(31, 155, 5)])
     muedges = np.linspace(-1, 1, 241)
     edges = (redges, muedges)
-    nquantiles = 5
 
     # HOD configuration
     dataset = 'bossprior'
-    config_dir = '/pscratch/sd/c/cuesta/ds_boss/code/'
-    config_fn = Path(config_dir, f'hod_config_{dataset}.yaml')
+    config_fn = Path(args.hod_config_dir, f'hod_config_{dataset}.yaml')
+    logger.info(f'Loading HOD configuration from {config_fn}')
     config = yaml.safe_load(open(config_fn))
 
     # baseline AbacusSummit cosmology as our fiducial
     fid_cosmo = AbacusSummit(0)
+    redshift = args.redshift
 
-    for cosmo in range(start_cosmo, start_cosmo + n_cosmo):
+    for cosmo in range(args.start_cosmo, args.start_cosmo + args.n_cosmo):
         # cosmology of the mock as the truth
         mock_cosmo = AbacusSummit(cosmo)
         az = 1 / (1 + redshift)
@@ -191,48 +190,46 @@ if __name__ == '__main__':
         q_perp = mock_cosmo.comoving_angular_distance(redshift) / fid_cosmo.comoving_angular_distance(redshift)
         q_para = fid_cosmo.efunc(redshift) / mock_cosmo.efunc(redshift)
         q = q_perp**(2/3) * q_para**(1/3)
-        print(f'q_perp = {q_perp:.3f}')
-        print(f'q_para = {q_para:.3f}')
-        print(f'q = {q:.3f}')
+        logger.info(f'q_perp = {q_perp:.3f}, q_para = {q_para:.3f}, q = {q:.3f}')
 
-        hods_dir = Path(f'/pscratch/sd/c/cuesta/ds_boss/parameters/HOD/{dataset}/')
+        hods_dir = Path(args.hod_params_dir, dataset)
         hods_fn = hods_dir / f'hod_parameters_{dataset}_c{cosmo:03}.csv'
+        logger.info(f'Loading HOD parameters from {hods_fn}')
         hod_params = np.genfromtxt(hods_fn, skip_header=1, delimiter=',')
 
-        for phase in range(start_phase, start_phase + n_phase):
+        for phase in range(args.start_phase, args.start_phase + args.n_phase):
             sim_fn = f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}'
             config['sim_params']['sim_name'] = sim_fn
             newBall, param_mapping, param_tracer, data_params = setup_hod(config)
 
-            for hod in range(start_hod, start_hod + n_hod):
-                print(f'c{cosmo:03} ph{phase:03} hod{hod}')
+            for hod in range(args.start_hod, args.start_hod + args.n_hod):
                 if not overwrite:
                     # if output files exist, skip to next iteration
                     cross_fn = Path(
-                        f'/global/homes/e/epaillas/carolscratch/ds_boss/ds_cross_multipoles/HOD/{dataset}/',
+                        args.outdir / f'ds_cross_multipoles/HOD/{dataset}/',
                         f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/',
-                        f'ds_cross_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                        f'ds_cross_multipoles_{args.split}split_{args.filter_shape.lower()}'\
+                        f'_Rs{args.smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                     )
                     auto_fn = Path(
-                        f'/global/homes/e/epaillas/carolscratch/ds_boss/ds_auto_multipoles/HOD/{dataset}/',
+                        args.outdir / f'ds_auto_multipoles/HOD/{dataset}/',
                         f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/',
-                        f'ds_auto_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
+                        f'ds_auto_multipoles_{args.split}split_{args.filter_shape.lower()}'\
+                        f'_Rs{args.smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
                     )
                     if os.path.exists(cross_fn) and os.path.exists(auto_fn):
-                        print(f'c{cosmo:03} ph{phase:03} hod{hod} already exists')
+                        logger.info(f'c{cosmo:03} ph{phase:03} hod{hod} already exists')
                         continue
 
                 hod_dict = get_hod(hod_params[hod], param_mapping, param_tracer,
-                              data_params, newBall, nthreads)
+                              data_params, newBall, args.nthreads)
 
-                if save_mock:
-                    output_dir = Path(f'/global/homes/e/epaillas/carolscratch/ds_boss/HOD/{dataset}/',
-                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
+                if args.save_hod:
+                    output_dir = Path(args.outdir / f'HOD/{dataset}/',
+                                     f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
-                    output_fn = Path(
-                        output_dir,
-                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}_hod{hod}.fits'
-                    )
+                    output_fn = Path(output_dir,
+                                     f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}_hod{hod}.fits')
                     output_mock(hod_dict, newBall, output_fn, 'LRG',)
 
                 x, y, z, x_rsd, y_rsd, z_rsd = get_rsd_positions(hod_dict)
@@ -240,7 +237,7 @@ if __name__ == '__main__':
                 cross_los = []
                 auto_los = []
                 for los in ['x', 'y', 'z']:
-                    if split == 'z':
+                    if args.split == 'z':
                         xpos = x_rsd if los == 'x' else x
                         ypos = y_rsd if los == 'y' else y
                         zpos = z_rsd if los == 'z' else z
@@ -251,87 +248,83 @@ if __name__ == '__main__':
 
                     data_positions_ap = get_distorted_positions(positions=data_positions, los=los,
                                                                 q_perp=q_perp, q_para=q_para)
-                    boxsize_ap = np.array(get_distorted_box(boxsize=boxsize, q_perp=q_perp, q_para=q_para,
+                    boxsize_ap = np.array(get_distorted_box(boxsize=args.boxsize, q_perp=q_perp, q_para=q_para,
                                                             los=los))
                     boxcenter_ap = boxsize_ap / 2
 
                     start_time = time.time()
                     quantiles_ap, quantiles_idx, density = density_split(
                         data_positions=data_positions_ap, boxsize=boxsize_ap,
-                        boxcenter=boxcenter_ap, cellsize=cellsize, seed=phase,
-                        filter_shape=filter_shape, smoothing_radius=smoothing_radius,
-                        nquantiles=5, method='mesh', nthreads=nthreads,)
-                    print(f'split took {time.time() - start_time} sec')
+                        boxcenter=boxcenter_ap, cellsize=args.cellsize, seed=phase,
+                        filter_shape=args.filter_shape, smoothing_radius=args.smoothing_radius,
+                        nquantiles=args.nquantiles, nquery=args.nquery, nthreads=args.nthreads,)
+                    logger.info(f'Density split took {time.time() - start_time:.2f} seconds')
 
-                    cout = {
-                        'density': density,
-                        'quantiles_idx': quantiles_idx,
-                    }
-                    output_dir = Path(f'/global/homes/e/epaillas/carolscratch/ds_boss/density_pdf/HOD/{dataset}/',
-                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
+                    if args.save_density:
+                        cout = {'density': density, 'quantiles_idx': quantiles_idx}
+                        output_dir = Path(args.outdir, 'density_pdf/HOD/{dataset}/',
+                                          f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
+                        Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        output_fn = Path(output_dir,
+                                         f'density_pdf_{args.split}split_{args.filter_shape.lower()}_NQ{args.quantiles}'\
+                                         f'_Rs{args.smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy')
+                        logger.info(f'Saving density pdf to {output_fn}')
+                        np.save(output_fn, cout)
+
+                    if args.save_clustering:
+                        logger.info('Computing cross-correlation function')
+                        start_time = time.time()
+                        cross_ds = []
+                        for i in range(args.nquantiles):
+                            logger.info(f'cosmo {cosmo}, hod {hod}, los {los}, ds{i}')
+                            result = TwoPointCorrelationFunction(
+                                'smu', edges=edges, data_positions1=quantiles_ap[i],
+                                data_positions2=data_positions_ap, los=los,
+                                engine='corrfunc', boxsize=boxsize_ap, nthreads=args.nthreads,
+                                compute_sepsavg=False, position_type='pos',
+                            )
+
+                            s, multipoles = result(ells=(0, 2, 4), return_sep=True)
+                            cross_ds.append(multipoles)
+                        cross_los.append(cross_ds)
+                        logger.info(f'CCF took {time.time() - start_time:.2f} seconds')
+
+                        logger.info('Computing auto-correlation function')
+                        start_time = time.time()
+                        auto_ds = []
+                        for i in range(args.nquantiles):
+                            result = TwoPointCorrelationFunction(
+                                'smu', edges=edges, data_positions1=quantiles_ap[i],
+                                los=los, engine='corrfunc', boxsize=boxsize_ap, nthreads=args.nthreads,
+                                compute_sepsavg=False, position_type='pos'
+                            )
+                            s, multipoles = result(ells=(0, 2, 4), return_sep=True)
+                            auto_ds.append(multipoles)
+                        auto_los.append(auto_ds)
+                        logger.info(f'ACF took {time.time() - start_time:.2f} seconds')
+
+                if args.save_clustering:
+                    cross_los = np.asarray(cross_los)
+                    auto_los = np.asarray(auto_los)
+
+                    cout = {'s': s, 'multipoles': cross_los}
+                    output_dir = Path(args.outdir,
+                                        f'ds_cross_multipoles/HOD/{dataset}/'
+                                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
-                    output_fn = Path(
-                        output_dir,
-                        f'density_pdf_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
-                    )
+                    output_fn = Path(output_dir,
+                                        f'ds_cross_multipoles_{args.split}split_{args.filter_shape.lower()}'\
+                                        f'_NQ{args.nquantiles}_Rs{args.smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy')
+                    logger.info(f'Saving cross-correlation function to {output_fn}')
                     np.save(output_fn, cout)
 
-                    # QUINTILE-GALAXY CROSS-CORRELATION
-                    start_time = time.time()
-                    cross_ds = []
-                    for i in [0, 1, 3, 4]:
-                        print(f'cosmo {cosmo}, hod {hod}, los {los}, ds{i}')
-                        result = TwoPointCorrelationFunction(
-                            'smu', edges=edges, data_positions1=quantiles_ap[i],
-                            data_positions2=data_positions_ap, los=los,
-                            engine='corrfunc', boxsize=boxsize_ap, nthreads=nthreads,
-                            compute_sepsavg=False, position_type='pos',
-                        )
-
-                        s, multipoles = result(ells=(0, 2, 4), return_sep=True)
-                        cross_ds.append(multipoles)
-                    cross_los.append(cross_ds)
-                    print(f'CCF took {time.time() - start_time} sec')
-
-                    # QUINTILE AUTOCORRELATION
-                    start_time = time.time()
-                    auto_ds = []
-                    for i in [0, 1, 3, 4]:
-                        result = TwoPointCorrelationFunction(
-                            'smu', edges=edges, data_positions1=quantiles_ap[i],
-                            los=los, engine='corrfunc', boxsize=boxsize_ap, nthreads=nthreads,
-                            compute_sepsavg=False, position_type='pos'
-                        )
-                        s, multipoles = result(ells=(0, 2, 4), return_sep=True)
-                        auto_ds.append(multipoles)
-                    auto_los.append(auto_ds)
-                    print(f'ACF took {time.time() - start_time} sec')
-
-                cross_los = np.asarray(cross_los)
-                auto_los = np.asarray(auto_los)
-
-                cout = {
-                    's': s,
-                    'multipoles': cross_los
-                }
-                output_dir = Path(f'/global/homes/e/epaillas/carolscratch/ds_boss/ds_cross_multipoles/HOD/{dataset}/',
-                    f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
-                Path(output_dir).mkdir(parents=True, exist_ok=True)
-                output_fn = Path(
-                    output_dir,
-                    f'ds_cross_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
-                )
-                np.save(output_fn, cout)
-
-                cout = {
-                    's': s,
-                    'multipoles': auto_los
-                }
-                output_dir = Path(f'/global/homes/e/epaillas/carolscratch/ds_boss/ds_auto_multipoles/HOD/{dataset}/',
-                    f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
-                Path(output_dir).mkdir(parents=True, exist_ok=True)
-                output_fn = Path(
-                    output_dir,
-                    f'ds_auto_multipoles_{split}split_{filter_shape.lower()}_Rs{smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy'
-                )
-                np.save(output_fn, cout)
+                    cout = {'s': s, 'multipoles': auto_los}
+                    output_dir = Path(args.outdir,
+                                        f'ds_auto_multipoles/HOD/{dataset}/',
+                                        f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
+                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    output_fn = Path(output_dir,
+                                        f'ds_auto_multipoles_{args.split}split_{args.filter_shape.lower()}'\
+                                        f'_NQ{args.nquantiles}_Rs{args.smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy')
+                    logger.info(f'Saving auto-correlation function to {output_fn}')
+                    np.save(output_fn, cout)
