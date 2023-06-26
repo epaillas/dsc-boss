@@ -160,6 +160,7 @@ if __name__ == '__main__':
     parser.add_argument("--outdir", type=str, default="/pscratach/sd/c/cuesta/ds_boss/")
     parser.add_argument("--hod_config_dir", type=str, default="/pscratch/sd/c/cuesta/ds_boss/code/")
     parser.add_argument('--hod_params_dir', type=str, default="/pscratch/sd/c/cuesta/ds_boss/parameters/HOD/")
+    parser.add_argument('--quantiles_clustering', help="List of quantiles to calculate the clustering for", type=int, nargs='*', default=None)
 
     args = parser.parse_args()
 
@@ -169,6 +170,11 @@ if __name__ == '__main__':
                         np.arange(31, 155, 5)])
     muedges = np.linspace(-1, 1, 241)
     edges = (redges, muedges)
+
+    if args.quantiles_clustering is None:
+        quantiles_clustering = list(range(args.nquantiles))
+    else:
+        quantiles_clustering = args.quantiles_clustering
 
     # HOD configuration
     dataset = 'bossprior'
@@ -266,39 +272,43 @@ if __name__ == '__main__':
                                           f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
                         Path(output_dir).mkdir(parents=True, exist_ok=True)
                         output_fn = Path(output_dir,
-                                         f'density_pdf_{args.split}split_{args.filter_shape.lower()}_NQ{args.quantiles}'\
+                                         f'density_pdf_{args.split}split_{args.filter_shape.lower()}_NQ{args.nquantiles}'\
                                          f'_Rs{args.smoothing_radius}_c{cosmo:03}_ph{phase:03}_hod{hod}.npy')
                         logger.info(f'Saving density pdf to {output_fn}')
                         np.save(output_fn, cout)
 
                     if args.save_clustering:
-                        logger.info('Computing cross-correlation function')
+                        logger.info(f'Computing cross-correlation function for quantiles {quantiles_clustering}')
                         start_time = time.time()
                         cross_ds = []
                         for i in range(args.nquantiles):
-                            logger.info(f'cosmo {cosmo}, hod {hod}, los {los}, ds{i}')
-                            result = TwoPointCorrelationFunction(
-                                'smu', edges=edges, data_positions1=quantiles_ap[i],
-                                data_positions2=data_positions_ap, los=los,
-                                engine='corrfunc', boxsize=boxsize_ap, nthreads=args.nthreads,
-                                compute_sepsavg=False, position_type='pos',
-                            )
-
-                            s, multipoles = result(ells=(0, 2, 4), return_sep=True)
+                            if i in quantiles_clustering:
+                                result = TwoPointCorrelationFunction(
+                                    'smu', edges=edges, data_positions1=quantiles_ap[i],
+                                    data_positions2=data_positions_ap, los=los,
+                                    engine='corrfunc', boxsize=boxsize_ap, nthreads=args.nthreads,
+                                    compute_sepsavg=False, position_type='pos',
+                                )
+                                s, multipoles = result(ells=(0, 2, 4), return_sep=True)
+                            else:
+                                multipoles = np.zeros((3, len(redges) - 1))
                             cross_ds.append(multipoles)
                         cross_los.append(cross_ds)
                         logger.info(f'CCF took {time.time() - start_time:.2f} seconds')
 
-                        logger.info('Computing auto-correlation function')
+                        logger.info(f'Computing auto-correlation function for quantiles {quantiles_clustering}')
                         start_time = time.time()
                         auto_ds = []
                         for i in range(args.nquantiles):
-                            result = TwoPointCorrelationFunction(
-                                'smu', edges=edges, data_positions1=quantiles_ap[i],
-                                los=los, engine='corrfunc', boxsize=boxsize_ap, nthreads=args.nthreads,
-                                compute_sepsavg=False, position_type='pos'
-                            )
-                            s, multipoles = result(ells=(0, 2, 4), return_sep=True)
+                            if i in quantiles_clustering:
+                                result = TwoPointCorrelationFunction(
+                                    'smu', edges=edges, data_positions1=quantiles_ap[i],
+                                    los=los, engine='corrfunc', boxsize=boxsize_ap, nthreads=args.nthreads,
+                                    compute_sepsavg=False, position_type='pos'
+                                )
+                                s, multipoles = result(ells=(0, 2, 4), return_sep=True)
+                            else:
+                                multipoles = np.zeros((3, len(redges) - 1))
                             auto_ds.append(multipoles)
                         auto_los.append(auto_ds)
                         logger.info(f'ACF took {time.time() - start_time:.2f} seconds')

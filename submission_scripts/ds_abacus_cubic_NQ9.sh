@@ -17,8 +17,9 @@ N_HOD=100
 START_HOD=0
 N_COSMO=1
 START_COSMO=$((SLURM_ARRAY_TASK_ID * N_COSMO))
+START_COSMO=0
 
-time python /global/homes/e/epaillas/code/dsc-boss/ds_abacus_cubic.py \
+time python ../ds_abacus_cubic.py \
     --start_hod "$START_HOD" \
     --n_hod "$N_HOD" \
     --start_cosmo "$START_COSMO" \
@@ -27,3 +28,4 @@ time python /global/homes/e/epaillas/code/dsc-boss/ds_abacus_cubic.py \
     --outdir "/pscratch/sd/c/cuesta/ds_boss/" \
     --save_clustering \
     --save_density \
+    --quantiles_clustering 0 8 \
