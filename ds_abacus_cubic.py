@@ -268,7 +268,7 @@ if __name__ == '__main__':
 
                     if args.save_density:
                         cout = {'density': density, 'quantiles_idx': quantiles_idx}
-                        output_dir = Path(args.outdir, 'density_pdf/HOD/{dataset}/',
+                        output_dir = Path(args.outdir, f'density_pdf/HOD/{dataset}/',
                                           f'AbacusSummit_base_c{cosmo:03}_ph{phase:03}/z0.500/')
                         Path(output_dir).mkdir(parents=True, exist_ok=True)
                         output_fn = Path(output_dir,
